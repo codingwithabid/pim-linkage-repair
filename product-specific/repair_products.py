@@ -298,57 +298,93 @@ def setup_logging(log_dir: Path, verbose: bool = False) -> logging.Logger:
 
 def _parse_issue_cell(
     cell_value: Any,
-) -> tuple[str | None, list[str]]:
+) -> tuple[dict[str, list[str]], list[str]]:
     """
-    Parse a variant-list cell. Handles BOTH possible cell formats:
+    Parse a variant-list cell. The sheets use a few different cell shapes,
+    and this function handles all of them.
 
-    Format A — bare variant list (preferred, when issue_label is in its
-    own column):
+    Format A — bare variant list (when issue_label is in its own column
+    AND the row has only ONE issue code):
+
         "BA-XYZ123, BA-ABC456"
         "BA-XYZ123 (Foo), BA-ABC456 (Bar)"
 
-    Format B — variant list with the issue CODE as a prefix (real-world
-    cells often look like this):
+    Format B — single-code prefix (the row has only one issue, but it's
+    written as a prefix inside the cell):
+
         "PARENT_DOES_NOT_LINK_BACK: BA-XYZ123 (Foo), BA-ABC456 (Bar)"
 
-    Returns (embedded_code, variant_ids). embedded_code is the prefix code
-    if format B, else None. variant_ids are the IDs after the prefix is
-    stripped; the "(Name)" labels are dropped.
+    Format C — multi-code (compound) cell, ONE code per line. This is
+    the shape compound rows use in the real spreadsheets:
 
-    Empty cell → (None, []).
+        "PARENT_DOES_NOT_LINK_BACK: BA-FOO (cordial)
+         STALE_LATEST_EMPTY: BA-BAR (cordisaal)"
 
-    Why this matters: without prefix-stripping, the regex would pick up
-    "PARENT_DOES_NOT_LINK_BACK" as the first "variant ID" because the id
-    pattern matches it too. The caller can also use the returned code as
-    a fallback filter if the sheet doesn't have a separate issue_label
-    column.
+    Returns (by_code, no_code_ids) where:
+      - `by_code` maps each recognized CODE to the list of variant IDs
+        directly under it. Empty if no CODE prefixes are found.
+      - `no_code_ids` are the variant IDs found without any code prefix
+        (for format A, where the caller knows the code from the
+        issue_label column).
+
+    Empty cell → ({}, []).
+
+    Why this matters: when issue_label is COMPOUND (e.g.
+    "PARENT_DOES_NOT_LINK_BACK | STALE_LATEST_EMPTY"), the cell groups
+    variants under each code separately. Naively grabbing every ID
+    would pull in variants meant for other scripts (e.g. variant-side
+    STALE_LATEST_EMPTY repairs). The caller filters by KEEP_ISSUE_CODES
+    to take only the relevant variants.
     """
     if cell_value is None:
-        return None, []
+        return {}, []
     text = str(cell_value).strip()
     if not text:
-        return None, []
+        return {}, []
 
-    # If the cell starts with "CODE:" (a known issue code followed by a
-    # colon), strip that prefix and remember the code. Match against
-    # KNOWN_ISSUE_CODES so we don't accidentally treat a normal variant
-    # id like "BA-FOO:something" as a code.
-    embedded_code: str | None = None
-    prefix_match = re.match(r"\s*([A-Z][A-Z0-9_]+)\s*:\s*", text)
-    if prefix_match and prefix_match.group(1) in KNOWN_ISSUE_CODES:
-        embedded_code = prefix_match.group(1)
-        text = text[prefix_match.end():]
+    # Split into CODE-labeled SECTIONS using a regex that captures each
+    # "CODE: ..." block. The lookahead stops at the start of the next
+    # known code or end-of-string, so multi-line compound cells parse
+    # correctly even with whitespace between sections.
+    # The known codes list is a fixed alternation built from KNOWN_ISSUE_CODES.
+    known_alt = "|".join(re.escape(c) for c in sorted(KNOWN_ISSUE_CODES, key=len, reverse=True))
+    section_re = re.compile(
+        rf"\b({known_alt})\s*:\s*([\s\S]*?)(?=(?:\b(?:{known_alt})\s*:)|\Z)",
+        re.MULTILINE,
+    )
 
-    ids: list[str] = []
-    seen: set[str] = set()
-    for m in _VARIANT_ID_RE.finditer(text):
-        tok = m.group(1).strip()
-        # Skip empty matches, the prefix-code itself, and any other known
-        # issue code that might appear later in the cell (defensive).
-        if tok and tok not in seen and tok not in KNOWN_ISSUE_CODES:
-            seen.add(tok)
-            ids.append(tok)
-    return embedded_code, ids
+    by_code: dict[str, list[str]] = {}
+    matched_anything = False
+    for m in section_re.finditer(text):
+        matched_anything = True
+        code = m.group(1)
+        body = m.group(2) or ""
+        ids: list[str] = []
+        seen_in_section: set[str] = set()
+        for id_m in _VARIANT_ID_RE.finditer(body):
+            tok = id_m.group(1).strip()
+            if tok and tok not in seen_in_section and tok not in KNOWN_ISSUE_CODES:
+                seen_in_section.add(tok)
+                ids.append(tok)
+        if ids:
+            # If the same code appears twice in one cell (defensive),
+            # merge while preserving order and uniqueness.
+            existing = by_code.setdefault(code, [])
+            for vid in ids:
+                if vid not in existing:
+                    existing.append(vid)
+
+    no_code_ids: list[str] = []
+    if not matched_anything:
+        # No CODE: prefixes anywhere → format A: bare variant list.
+        seen: set[str] = set()
+        for m in _VARIANT_ID_RE.finditer(text):
+            tok = m.group(1).strip()
+            if tok and tok not in seen and tok not in KNOWN_ISSUE_CODES:
+                seen.add(tok)
+                no_code_ids.append(tok)
+
+    return by_code, no_code_ids
 
 
 def read_sheets(
@@ -473,29 +509,64 @@ def read_sheets(
             if not product_id:
                 continue
 
-            # variants cell — parse list, and capture any embedded "CODE:" prefix
+            # Parse the variants cell into {code: [ids]} plus a no-code bucket
+            # for sheets that use bare-list cells (format A).
             variants_cell = row[variants_col] if variants_col < len(row) else None
-            embedded_code, variant_ids = _parse_issue_cell(variants_cell)
+            by_code, no_code_ids = _parse_issue_cell(variants_cell)
 
-            # Determine the row's issue code, preferring the dedicated
-            # issue_label column over the cell's embedded prefix. Both
-            # paths converge on `label`.
-            label: str | None = None
+            # Determine the row's labels. issue_label can be COMPOUND
+            # (e.g. "PARENT_DOES_NOT_LINK_BACK | STALE_LATEST_EMPTY"),
+            # so we split on '|' and treat each piece as an independent code.
+            labels_from_col: set[str] = set()
             if issue_label_col is not None and issue_label_col < len(row):
                 v = row[issue_label_col]
                 if v is not None:
-                    label = str(v).strip() or None
-            if label is None:
-                label = embedded_code  # may still be None
+                    raw = str(v).strip()
+                    if raw:
+                        labels_from_col = {
+                            piece.strip() for piece in raw.split("|") if piece.strip()
+                        }
 
-            if label is None:
+            # Combine: union of labels-from-column AND keys-from-cell.
+            # When the cell uses format C (multi-code), `by_code` keys are
+            # authoritative. When the cell is bare (format A), only the
+            # issue_label column tells us what code applies.
+            all_codes: set[str] = labels_from_col | set(by_code.keys())
+
+            if not all_codes:
                 counts["rows_no_issue_label"] += 1
                 continue
-            if label not in KEEP_ISSUE_CODES:
+
+            # Pick the codes we care about — intersection with KEEP_ISSUE_CODES.
+            relevant_codes = all_codes & KEEP_ISSUE_CODES
+            if not relevant_codes:
                 counts["rows_filtered_out"] += 1
                 continue
 
+            # Build the variantIds list for THIS code(s) only:
+            #   - If the cell has per-code sections, take ONLY the ones
+            #     under our relevant codes.
+            #   - Otherwise (bare cell, single label from issue_label), use
+            #     the no_code_ids list.
+            variant_ids: list[str] = []
+            seen: set[str] = set()
+            if by_code:
+                for code in relevant_codes:
+                    for vid in by_code.get(code, []):
+                        if vid not in seen:
+                            seen.add(vid)
+                            variant_ids.append(vid)
+            else:
+                # Bare cell — all variants belong to the labels in
+                # labels_from_col, and at least one of those is relevant.
+                for vid in no_code_ids:
+                    if vid not in seen:
+                        seen.add(vid)
+                        variant_ids.append(vid)
+
             if not variant_ids:
+                # Compound row where our code lists no variants — defensive,
+                # treat as if there's nothing to do here.
                 counts["rows_no_variant_ids"] += 1
                 continue
 
@@ -517,7 +588,7 @@ def read_sheets(
                 "productName":       product_name,
                 "productTemplateId": tpl_id,
                 "variantIds":        variant_ids,
-                "issues":            [label],
+                "issues":            sorted(relevant_codes),
             })
             counts["entries"] += 1
 
@@ -1303,7 +1374,7 @@ def main() -> int:
                     help="Output dir for product_map.json, duplicates, payloads")
     ap.add_argument(
         "--api-host",
-        default="https://management-api.upstartcommerce.com",
+        default="http://localhost:8080",
     )
     ap.add_argument("--site-id", default=PRIMARY_SITE_ID)
     ap.add_argument(
@@ -1313,10 +1384,10 @@ def main() -> int:
     )
     ap.add_argument(
         "--session-id",
-        default=os.environ.get("API_SESSION_ID", "_QkDA7SkbycANI62B0wGYw.MG98S944Wggq60gptdEK3_dSPPoAepHOmHrPvsuE-oyTjpHOlnJqMcvMCwKWnfjdAAEyzLdxnDawbG1WJ7iZYZZ140RSLBaF3M51rzWChZ-FZRuMPyz_lB8WQpwHEwn_"),
+        default=os.environ.get("API_SESSION_ID", "example"),
     )
     ap.add_argument("--cookie", default=os.environ.get("API_COOKIE", ""))
-    ap.add_argument("--workers", type=int, default=1)
+    ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--limit", type=int, default=0,
                     help="Process first N clean products (0=all). For testing.")
     ap.add_argument("--dry-run", action="store_true",
