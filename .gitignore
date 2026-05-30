@@ -1,0 +1,152 @@
+# =============================================================================
+# .gitignore — Production Activity / Linkage Repair Toolkit
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+*.egg
+.eggs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.python-version
+
+# Test / coverage
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# -----------------------------------------------------------------------------
+# Runtime artifacts produced by the pipelines
+# -----------------------------------------------------------------------------
+# Each pipeline writes to a local `out/` folder by default. These hold
+# repaired payloads, maps, snapshots, duplicates, and logs — none should
+# be committed.
+out/
+out-*/
+**/out/
+**/out-*/
+
+# Logs from any pipeline run (.run.log, .success.log, .errors.log + rotations)
+logs/
+**/logs/
+*.log
+*.log.*
+
+# Generated Excel reports — these are outputs, not inputs we version.
+# IMPORTANT: the sample report (e.g. report-linkages_1.xlsx) IS tracked.
+# Negate it below so this rule doesn't catch it.
+*.xlsx
+!report-linkages_1.xlsx
+
+# Generated JSON artifacts the pipelines produce. Listing them explicitly
+# (rather than ignoring all *.json) so any future config or fixture JSONs
+# we DO want to commit aren't accidentally hidden.
+variant_map.json
+product_map.json
+product_map_negative.json
+duplicate_variants.json
+duplicate_variants_across_product.json
+duplicate_variants_across_product_negative.json
+variant_states_pre_repair.json
+variant_states_pre_repair_negative.json
+product_states_pre_repair.json
+
+# Tools/ on-demand outputs (e.g. export_duplicates_to_excel.py result)
+duplicates_review.xlsx
+duplicates_combined.xlsx
+
+# Cassandra exports used as input to build-linkages-report. Large CSVs,
+# tenant-specific, never want them in git.
+product_item.csv
+product_item_live.csv
+*.csv
+
+# -----------------------------------------------------------------------------
+# Secrets / local config
+# -----------------------------------------------------------------------------
+# API_COOKIE and API_SESSION_ID go in env vars, not files — but if anyone
+# does write them to a .env, .env.local, or a cookie.txt, keep it out of git.
+.env
+.env.*
+!.env.example
+cookie.txt
+session.txt
+*.secret
+
+# -----------------------------------------------------------------------------
+# macOS
+# -----------------------------------------------------------------------------
+.DS_Store
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+.fseventsd
+Icon?
+
+# Thumbnails
+._*
+
+# Files that might appear in the root of a volume
+.DocumentRevisions-V100
+.TemporaryItems
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# -----------------------------------------------------------------------------
+# Editor / IDE
+# -----------------------------------------------------------------------------
+# VS Code — keep team-shared settings/launch configs committable by leaving
+# .vscode/ out of here. Add it back if you want per-developer settings ignored.
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+*.code-workspace
+
+# JetBrains (PyCharm, IntelliJ)
+.idea/
+*.iml
+*.iws
+
+# Sublime
+*.sublime-project
+*.sublime-workspace
+
+# Vim / Emacs
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+
+# -----------------------------------------------------------------------------
+# Misc temp / scratch
+# -----------------------------------------------------------------------------
+*.bak
+*.tmp
+*.temp
+tmp/
+temp/
+scratch/
