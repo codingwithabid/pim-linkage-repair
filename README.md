@@ -27,10 +27,12 @@ production-activity/
 │   └── publish_auto_generated_variants.py # Republish affected variants
 │
 └── product-specific-negative/          # Step 3 — Product-side repair (negative)
-    ├── repair_products_negative.py     #   Handles PRODUCT_DROPPED_VARIANT
-    ├── push_products_negative.py       #   PUT non-archived products
-    ├── repair_archived_products_negative.py            # Archived flow
-    └── publish_auto_generated_variants_negative.py     # Republish affected variants
+|   ├── repair_products_negative.py     #   Handles PRODUCT_DROPPED_VARIANT
+|   ├── push_products_negative.py       #   PUT non-archived products
+|   ├── repair_archived_products_negative.py            # Archived flow
+|   └── publish_auto_generated_variants_negative.py     # Republish affected variants
+└── tools/                                    # Shared utilities (run on demand)
+    └── export_duplicates_to_excel.py         #   Convert duplicate JSONs → Excel
 ```
 
 The **positive** and **negative** product pipelines read different sheets in the same report and produce separate artifact files (`product_map.json` vs `product_map_negative.json` etc.), so they can run independently without overwriting each other's outputs.
