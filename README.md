@@ -20,12 +20,27 @@ production-activity/
 │   ├── repair_archived_variants.py     #   Recover → PUT → COMMIT → archive flow
 │   └── publish_auto_generated_product.py  # Republish affected products
 │
-└── product-specific/                   # Step 2 — Repair from the product side
-    ├── repair_products.py              #   Build product map + repaired payloads
-    ├── push_products.py                #   PUT non-archived products
-    ├── repair_archived_products.py     #   Recover → PUT → COMMIT → archive flow
-    └── publish_auto_generated_variants.py # Republish affected variants
+├── product-specific/                   # Step 2 — Product-side repair (positive)
+│   ├── repair_products.py              #   Handles PARENT_DOES_NOT_LINK_BACK
+│   ├── push_products.py                #   PUT non-archived products
+│   ├── repair_archived_products.py     #   Recover → PUT → COMMIT → archive flow
+│   └── publish_auto_generated_variants.py # Republish affected variants
+│
+└── product-specific-negative/          # Step 3 — Product-side repair (negative)
+    ├── repair_products_negative.py     #   Handles PRODUCT_DROPPED_VARIANT
+    ├── push_products_negative.py       #   PUT non-archived products
+    ├── repair_archived_products_negative.py            # Archived flow
+    └── publish_auto_generated_variants_negative.py     # Republish affected variants
 ```
+
+The **positive** and **negative** product pipelines read different sheets in the same report and produce separate artifact files (`product_map.json` vs `product_map_negative.json` etc.), so they can run independently without overwriting each other's outputs.
+
+| | Positive | Negative |
+|---|---|---|
+| Sheet | All three sheets | `Product to verify(-ve)` only |
+| Issue code | `PARENT_DOES_NOT_LINK_BACK` | `PRODUCT_DROPPED_VARIANT` |
+| Fix | Add missing variants to product's `variantIds` | Re-attach dropped variants to product's `variantIds` |
+| Folder | `product-specific/` | `product-specific-negative/` |
 
 ---
 
@@ -63,9 +78,9 @@ python3 repair_archived_variants.py  --input ./out --workers 2
 python3 publish_auto_generated_product.py --input ./out --workers 2
 ```
 
-### 2. Product-Side Repair
+### 2. Product-Side Repair (Positive)
 
-Repairs product payloads (fixes `variantIds` on products) and republishes affected variants.
+Repairs product payloads for `PARENT_DOES_NOT_LINK_BACK` rows across all three sheets, then republishes affected variants.
 
 ```bash
 cd product-specific
@@ -76,6 +91,21 @@ python3 repair_products.py           --input ../report-linkages.xlsx --output ./
 python3 push_products.py             --input ./out --workers 2
 python3 repair_archived_products.py  --input ./out --workers 2
 python3 publish_auto_generated_variants.py --input ./out --workers 2
+```
+
+### 3. Product-Side Repair (Negative)
+
+Repairs product payloads for `PRODUCT_DROPPED_VARIANT` rows from the `Product to verify(-ve)` sheet, then republishes affected variants. Runs independently of step 2 — the negative scripts read their own `*_negative.json` artifacts so the two product-side pipelines can be run in either order or in parallel.
+
+```bash
+cd product-specific-negative
+export API_COOKIE='paste-from-DevTools'
+export API_SESSION_ID='paste-from-DevTools'
+
+python3 repair_products_negative.py            --input ../report-linkages.xlsx --output ./out --workers 2
+python3 push_products_negative.py              --input ./out --workers 2
+python3 repair_archived_products_negative.py   --input ./out --workers 2
+python3 publish_auto_generated_variants_negative.py --input ./out --workers 2
 ```
 
 ---
@@ -106,6 +136,7 @@ All pipeline scripts share the same argument interface:
 - Dependent republishing only occurs when a pending draft is confirmed via API
 - READY is never called — direct COMMIT is the contract for all publish operations (per operator direction)
 - `--dry-run` is available on every script for safe pre-flight checks
+- The positive and negative product pipelines are isolated: each reads its own map and snapshot files, so neither can overwrite the other's artifacts or accidentally pick up rows belonging to the other workflow
 
 ---
 
@@ -114,5 +145,6 @@ All pipeline scripts share the same argument interface:
 Each directory contains its own `readme.md` with detailed per-script documentation:
 
 - [`build-linkages-report/readme.md`](build-linkages-report/readme.md) — Report generation pipeline
-- [`product-specific/readme.md`](product-specific/readme.md) — Product-side repair pipeline
 - [`variant-specific/readme.md`](variant-specific/readme.md) — Variant-side repair pipeline
+- [`product-specific/readme.md`](product-specific/readme.md) — Product-side repair pipeline (positive)
+- [`product-specific-negative/readme.md`](product-specific-negative/readme.md) — Product-side repair pipeline (negative)
